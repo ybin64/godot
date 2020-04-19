@@ -31,6 +31,8 @@
 #ifndef ARKIT_INTERFACE_H
 #define ARKIT_INTERFACE_H
 
+#include <memory>
+
 #include "servers/arvr/arvr_interface.h"
 #include "servers/arvr/arvr_positional_tracker.h"
 #include "servers/camera/camera_feed.h"
@@ -46,6 +48,13 @@ class ARKitShader;
 
 class ARKitInterface : public ARVRInterface {
 	GDCLASS(ARKitInterface, ARVRInterface);
+public:
+
+    enum Tracking { /* ARKit tracking type */
+        ARKIT_TRACKING_WORLD = 1, /* use ARWorldTrackingConfiguration, also tracks images, but slower */
+        ARKIT_TRACKING_IMAGE = 2  /* use ARImageTrackingConfiguration */
+    };
+
 
 private:
 	bool initialized;
@@ -73,9 +82,14 @@ private:
 	unsigned int num_anchors;
 	unsigned int max_anchors;
 	anchor_map *anchors;
-	ARVRPositionalTracker *get_anchor_for_uuid(const unsigned char *p_uuid);
+	ARVRPositionalTracker *get_anchor_for_uuid(const unsigned char *p_uuid, ARVRServer::TrackerType type, void *p_anchor);
 	void remove_anchor_for_uuid(const unsigned char *p_uuid);
 	void remove_all_anchors();
+
+    class Impl;
+    std::unique_ptr<Impl> pimpl;
+
+    Tracking tracking_type;
 
 protected:
 	static void _bind_methods();
@@ -96,6 +110,14 @@ public:
 
 	/* while Godot has its own raycast logic this takes ARKits camera into account and hits on any ARAnchor */
 	Array raycast(Vector2 p_screen_coord);
+
+    void update_tracking_configuration();
+
+    void use_world_tracking();
+    void use_image_tracking();
+
+    RID add_tracking_image(Object* image, float physical_width);
+    RID get_tracking_image_rid(int arvr_positional_tracker_id);
 
 	void notification(int p_what);
 

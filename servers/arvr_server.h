@@ -63,6 +63,7 @@ public:
 		TRACKER_CONTROLLER = 0x01, /* tracks a controller */
 		TRACKER_BASESTATION = 0x02, /* tracks location of a base station */
 		TRACKER_ANCHOR = 0x04, /* tracks an anchor point, used in AR to track a real live location */
+        TRACKER_ARKIT_IMAGE_ANCHOR = 0x40, /* arkit image anchor */
 		TRACKER_UNKNOWN = 0x80, /* unknown tracker */
 
 		TRACKER_ANY_KNOWN = 0x7f, /* all except unknown */

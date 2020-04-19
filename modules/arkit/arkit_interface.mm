@@ -41,6 +41,80 @@
 #include "arkit_interface.h"
 #include "arkit_session_delegate.h"
 
+#include "arkit_utils.h"
+
+
+//////
+
+/**
+    Using the Impl class due to compilation problem with NSSet
+*/
+
+class ARKitInterface::Impl {
+private:
+    struct ImageMapItem {
+        RID rid;
+        ARReferenceImage *image;
+        int tracker_id; /* ARVRPositionalTracker id */
+
+        ImageMapItem() : rid(RID()), image(nil), tracker_id(-1) {}
+        ImageMapItem(RID rid, ARReferenceImage *image) : rid(rid), image(image), tracker_id(-1) {}
+    };
+
+    typedef Map<uint32_t /* RID id */, ImageMapItem> ImageMap;
+    ImageMap image_map;
+
+public:
+    NSSet *detectionImages;
+
+    int debug_count_1;
+
+    Impl() {
+        detectionImages = [NSSet set];
+        debug_count_1 = 0;
+    }
+
+    ~Impl() {
+        print_line("ARKitInterface::~Impl");
+    }
+
+    void add_detection_image(RID image_resource, ARReferenceImage *ref_image) {
+         detectionImages = [detectionImages setByAddingObject: ref_image];
+         image_map[image_resource.get_id()] = ImageMapItem(image_resource, ref_image);
+    }
+
+    void set_arvr_positional_tracker_id(ARReferenceImage *ref_image, int id) {
+        ImageMap::Element *item = image_map.front();
+
+        while (item != NULL) {
+            ImageMapItem& value = item->value();
+            if (value.image == ref_image) {
+                value.tracker_id = id;
+                return;
+            }
+            item = item->next();
+        }
+
+        print_error("ARKitInterface::Impl::set_arvr_poistional_tracker_id : Reference image not found!");
+    }
+
+    RID get_tracking_image_rid(int arvr_positional_tracker_id) {
+        ImageMap::Element *item = image_map.front();
+
+        while (item != NULL) {
+            ImageMapItem& value = item->value();
+            if (value.tracker_id == arvr_positional_tracker_id) {
+                return value.rid;
+            }
+
+            item = item->next();
+        }
+        return RID();
+    }
+};
+
+//////
+
 // just a dirty workaround for now, declare these as globals. I'll probably encapsulate ARSession and associated logic into an mm object and change ARKitInterface to a normal cpp object that consumes it.
 ARSession *ar_session;
 ARKitSessionDelegate *ar_delegate;
@@ -54,24 +128,46 @@ void ARKitInterface::start_session() {
 	// Ignore this if we're not initialized...
 	if (initialized) {
 		print_line("Starting ARKit session");
-
-		Class ARWorldTrackingConfigurationClass = NSClassFromString(@"ARWorldTrackingConfiguration");
-		ARWorldTrackingConfiguration *configuration = [ARWorldTrackingConfigurationClass new];
-
-		configuration.lightEstimationEnabled = light_estimation_is_enabled;
-		if (plane_detection_is_enabled) {
-			configuration.planeDetection = ARPlaneDetectionVertical | ARPlaneDetectionHorizontal;
-		} else {
-			configuration.planeDetection = 0;
-		}
-
-		// make sure our camera is on
-		if (feed.is_valid()) {
-			feed->set_active(true);
-		}
-
-		[ar_session runWithConfiguration:configuration];
+        update_tracking_configuration();
 	}
+}
+
+void ARKitInterface::update_tracking_configuration() {
+    ARConfiguration *configuration = nil;
+
+    remove_all_anchors();
+
+    if (tracking_type == ARKIT_TRACKING_WORLD) {
+        Class ARWorldTrackingConfigurationClass = NSClassFromString(@"ARWorldTrackingConfiguration");
+        ARWorldTrackingConfiguration *worldConfiguration = [ARWorldTrackingConfigurationClass new];
+
+        configuration = worldConfiguration;
+
+        worldConfiguration.lightEstimationEnabled = light_estimation_is_enabled;
+
+        if (plane_detection_is_enabled) {
+            worldConfiguration.planeDetection = ARPlaneDetectionVertical | ARPlaneDetectionHorizontal;
+        } else {
+            worldConfiguration.planeDetection = 0;
+        }
+
+        [worldConfiguration setDetectionImages: pimpl->detectionImages];       
+    } else if (tracking_type == ARKIT_TRACKING_IMAGE) {
+        ARImageTrackingConfiguration *imageConfiguration = [ARImageTrackingConfiguration new];
+          
+        configuration = imageConfiguration;
+
+        imageConfiguration.lightEstimationEnabled = light_estimation_is_enabled;
+        imageConfiguration.trackingImages = pimpl->detectionImages;
+        imageConfiguration.maximumNumberOfTrackedImages = pimpl->detectionImages.count;
+    }
+
+    if (configuration != nil) {
+        [ar_session runWithConfiguration:configuration];
+    } else {
+        print_error("ARKitInterface::update_tracking_configuration : Unknown tracking_type " + itos(tracking_type));
+    }
+
 }
 
 void ARKitInterface::stop_session() {
@@ -206,7 +302,54 @@ void ARKitInterface::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_ambient_color_temperature"), &ARKitInterface::get_ambient_color_temperature);
 
 	ClassDB::bind_method(D_METHOD("raycast", "screen_coord"), &ARKitInterface::raycast);
+
+    ClassDB::bind_method(D_METHOD("update_tracking_configuration"), &ARKitInterface::update_tracking_configuration);
+    ClassDB::bind_method(D_METHOD("use_world_tracking"), &ARKitInterface::use_world_tracking);
+    ClassDB::bind_method(D_METHOD("use_image_tracking"), &ARKitInterface::use_image_tracking);
+    ClassDB::bind_method(D_METHOD("add_tracking_image", "physical_width"), &ARKitInterface::add_tracking_image);
+    ClassDB::bind_method(D_METHOD("get_tracking_image_rid", "arvr_positional_tracker_id"), &ARKitInterface::get_tracking_image_rid);
+
 }
+
+
+//////
+
+void ARKitInterface::use_world_tracking() {
+    tracking_type = ARKIT_TRACKING_WORLD;
+    update_tracking_configuration();
+}
+
+void ARKitInterface::use_image_tracking() {
+    tracking_type = ARKIT_TRACKING_IMAGE;
+    update_tracking_configuration();
+}
+
+RID ARKitInterface::add_tracking_image(Object* img, float physical_width) {
+     print_line("ARKitInterface::add_image_anchor : 00 : " + rtos(physical_width));
+     Ref<Texture> texture = Object::cast_to<Texture>(img);
+
+     if (texture.is_valid()) {
+        Ref<Image> image = texture->get_data();
+
+        CGImageRef ir = texture_to_cgimagref(texture);
+        ARReferenceImage * ref_image = [[ARReferenceImage alloc] initWithCGImage:ir orientation:kCGImagePropertyOrientationUp physicalWidth:physical_width];
+
+        //pimpl->detectionImages = [pimpl->detectionImages setByAddingObject: refImage];
+
+        pimpl->add_detection_image(texture->get_rid(), ref_image);
+
+        return texture->get_rid();
+     } else {
+        print_error("add_image_anchor, expected a texture.");
+        return RID();
+     }
+}
+
+RID ARKitInterface::get_tracking_image_rid(int arvr_positional_tracker_id) {
+    return pimpl->get_tracking_image_rid(arvr_positional_tracker_id);
+}
+
+
 
 bool ARKitInterface::is_stereo() {
 	// this is a mono device...
@@ -356,7 +499,7 @@ void ARKitInterface::commit_for_eye(ARVRInterface::Eyes p_eye, RID p_render_targ
 	VSG::rasterizer->blit_render_target_to_screen(p_render_target, screen_rect, 0);
 }
 
-ARVRPositionalTracker *ARKitInterface::get_anchor_for_uuid(const unsigned char *p_uuid) {
+ARVRPositionalTracker *ARKitInterface::get_anchor_for_uuid(const unsigned char *p_uuid, ARVRServer::TrackerType type, void *p_anchor) {
 	if (anchors == NULL) {
 		num_anchors = 0;
 		max_anchors = 10;
@@ -378,13 +521,18 @@ ARVRPositionalTracker *ARKitInterface::get_anchor_for_uuid(const unsigned char *
 	}
 
 	ARVRPositionalTracker *new_tracker = memnew(ARVRPositionalTracker);
-	new_tracker->set_type(ARVRServer::TRACKER_ANCHOR);
+	new_tracker->set_type(type); //ARVRServer::TRACKER_ANCHOR);
+
+    if (type == ARVRServer::TRACKER_ARKIT_IMAGE_ANCHOR) {
+        ARImageAnchor *image_anchor = (ARImageAnchor *) p_anchor;
+        print_line("############## get_tracker_id()=" + itos(new_tracker->get_tracker_id()));
+        pimpl->set_arvr_positional_tracker_id(image_anchor.referenceImage, new_tracker->get_tracker_id());
+    }
 
 	char tracker_name[256];
 	sprintf(tracker_name, "Anchor %02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", p_uuid[0], p_uuid[1], p_uuid[2], p_uuid[3], p_uuid[4], p_uuid[5], p_uuid[6], p_uuid[7], p_uuid[8], p_uuid[9], p_uuid[10], p_uuid[11], p_uuid[12], p_uuid[13], p_uuid[14], p_uuid[15]);
 
 	String name = tracker_name;
-	print_line("Adding tracker " + name);
 	new_tracker->set_name(name);
 
 	// add our tracker
@@ -664,35 +812,57 @@ void ARKitInterface::_add_or_update_anchor(void *p_anchor) {
 
 	unsigned char uuid[16];
 	[anchor.identifier getUUIDBytes:uuid];
+    ARVRServer::TrackerType tracker_type = ARVRServer::TRACKER_ANCHOR;
+	
+    ARImageAnchor *image_anchor = nil;
+    
+    if ([anchor isKindOfClass:[ARImageAnchor class]]) {
+        //NSLog(@"ARKitInterface::_add_or_update_anchor : 10 : is ARImageAnchor : ");
+        image_anchor = (ARImageAnchor*) anchor;
+        tracker_type = ARVRServer::TRACKER_ARKIT_IMAGE_ANCHOR;
 
-	ARVRPositionalTracker *tracker = get_anchor_for_uuid(uuid);
+         pimpl->debug_count_1 += 1;
+    }
+   
+    ARVRPositionalTracker *tracker = get_anchor_for_uuid(uuid, tracker_type, image_anchor);
+
+    if (tracker == NULL) {
+        NSLog(@"ARKitInterface::_add_or_update_anchor : 15 : tracker == NULL : tracker_type=%d", tracker_type);        
+    }
+
 	if (tracker != NULL) {
 		// lets update our mesh! (using Arjens code as is for now)
 		// we should also probably limit how often we do this...
 
-		// can we safely cast this?
-		ARPlaneAnchor *planeAnchor = (ARPlaneAnchor *)anchor;
+        if (image_anchor) {         
+            Ref<Mesh> nomesh;
+            tracker->set_mesh(nomesh);
+        } else {
+            // can we safely cast this?
+            ARPlaneAnchor *planeAnchor = (ARPlaneAnchor *)anchor;
 
-		if (planeAnchor.geometry.triangleCount > 0) {
-			Ref<SurfaceTool> surftool;
-			surftool.instance();
-			surftool->begin(Mesh::PRIMITIVE_TRIANGLES);
+            if (planeAnchor.geometry.triangleCount > 0) {
+                Ref<SurfaceTool> surftool;
+                surftool.instance();
+                surftool->begin(Mesh::PRIMITIVE_TRIANGLES);
 
-			for (int j = planeAnchor.geometry.triangleCount * 3 - 1; j >= 0; j--) {
-				int16_t index = planeAnchor.geometry.triangleIndices[j];
-				simd_float3 vrtx = planeAnchor.geometry.vertices[index];
-				simd_float2 textcoord = planeAnchor.geometry.textureCoordinates[index];
-				surftool->add_uv(Vector2(textcoord[0], textcoord[1]));
-				surftool->add_color(Color(0.8, 0.8, 0.8));
-				surftool->add_vertex(Vector3(vrtx[0], vrtx[1], vrtx[2]));
-			}
+                for (int j = planeAnchor.geometry.triangleCount * 3 - 1; j >= 0; j--) {
+                    int16_t index = planeAnchor.geometry.triangleIndices[j];
+                    simd_float3 vrtx = planeAnchor.geometry.vertices[index];
+                    simd_float2 textcoord = planeAnchor.geometry.textureCoordinates[index];
+                    surftool->add_uv(Vector2(textcoord[0], textcoord[1]));
+                    surftool->add_color(Color(0.8, 0.8, 0.8));
+                    surftool->add_vertex(Vector3(vrtx[0], vrtx[1], vrtx[2]));
+                }
 
-			surftool->generate_normals();
-			tracker->set_mesh(surftool->commit());
-		} else {
-			Ref<Mesh> nomesh;
-			tracker->set_mesh(nomesh);
-		}
+                surftool->generate_normals();
+                tracker->set_mesh(surftool->commit());
+            } else {
+                Ref<Mesh> nomesh;
+                tracker->set_mesh(nomesh);
+            }
+        }
+
 
 		// Note, this also contains a scale factor which gives us an idea of the size of the anchor
 		// We may extract that in our ARVRAnchor class
@@ -723,7 +893,9 @@ void ARKitInterface::_remove_anchor(void *p_anchor) {
 	remove_anchor_for_uuid(uuid);
 }
 
-ARKitInterface::ARKitInterface() {
+ARKitInterface::ARKitInterface() 
+    : pimpl(new Impl())
+{
 	initialized = false;
 	session_was_started = false;
 	plane_detection_is_enabled = false;
@@ -740,6 +912,8 @@ ARKitInterface::ARKitInterface() {
 	image_width[1] = 0;
 	image_height[0] = 0;
 	image_height[1] = 0;
+
+    tracking_type = ARKIT_TRACKING_WORLD;
 }
 
 ARKitInterface::~ARKitInterface() {
